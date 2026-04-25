@@ -1,0 +1,98 @@
+FROM llama3.1:8b
+
+# =============================================================================
+# PARAMETERS
+# =============================================================================
+
+# num_ctx = 32768: pragmatic sweet spot for ≤23 GB RAM / no dedicated GPU.
+# llama3.1:8b natively supports 128k tokens, but memory pressure and
+# per-token latency degrade quality past ~32k on CPU-only inference.
+# Raise to 65536 or 131072 only if you have ≥24 GB VRAM.
+PARAMETER num_ctx 32768
+
+# num_predict = 4096: balanced middle-ground between the original 3072 and 8192.
+#
+# Reasoning:
+#   - Model B's SYSTEM prompt mandates ≥10 requirements per call.
+#   - Empirically, each ISO-style requirement costs ~175 tokens.
+#   - 3072 → ~17 requirements max (tight, risky on verbose descriptions).
+#   - 4096 → ~23 requirements max (comfortable headroom above the ≥10 mandate).
+#   - 8192 → ~46 requirements max (over-provisioned for single-pass generation;
+#             reserve for multi-section SRS generation via Python orchestration).
+#
+# Without an explicit num_predict, Ollama silently defaults to
+# (num_ctx − num_prompt_tokens), which collapses to near-zero on large prompts.
+PARAMETER num_predict 4096
+
+# temperature = 0.3: keeps output deterministic and structurally consistent.
+# NOTE: The Python orchestration layer MAY override this to ~0.45 for
+# sub-requirement generation passes where slight variation is acceptable.
+PARAMETER temperature 0.3
+
+PARAMETER top_k 40
+PARAMETER top_p 0.85
+
+# repeat_penalty = 1.02: intentionally LOW — do NOT raise this to 1.1.
+#
+# ISO/SAE requirements engineering demands repetition of domain vocabulary:
+# "shall", "must", "within", "ms", "Hz", "ASIL", "per ISO 26262", etc.
+# A penalty of 1.1 (Model B's original value) treats this essential repetition
+# as undesirable and causes the model to exhaust its comfortable vocabulary,
+# leading to paraphrased or shortened requirements and premature EOS tokens.
+# 1.02 applies only a marginal penalty, preserving terminological consistency.
+PARAMETER repeat_penalty 1.02
+
+# =============================================================================
+# SYSTEM PROMPT
+# =============================================================================
+# Provides: role definition, task framing, mandatory output format,
+# formatting rules, a concrete example, and the generation trigger.
+#
+# IMPORTANT: Because the complete format specification now lives here,
+# the Python generation nodes (generation_node / generate_sub_requirements)
+# MUST NOT duplicate these instructions. Duplication wastes prompt budget
+# (~400 tokens per call) and risks conflicting format directives that
+# produce malformed or inconsistent output.
+# =============================================================================
+SYSTEM """
+You are an expert Automotive Systems Requirements Engineer specializing in:
+- ISO/IEC/IEEE 29148 (Systems and Software Requirements Engineering)
+- ISO 26262 (Functional Safety for Road Vehicles)
+- SAE automotive standards (J2494, J1349, J1979, J3016)
+
+### YOUR TASK
+Analyze the provided vehicle technical specifications or use-cases and generate
+a structured, formal System Requirements Specification (SRS) using the format below.
+
+### MANDATORY OUTPUT FORMAT
+Each requirement MUST follow this exact structure — no exceptions:
+
+REQ-XXX: <Concise Requirement Title>
+Description: <Detailed, testable description with specific metrics (ms, Hz, V, Nm, °C),
+             ASIL classification if applicable, and standard reference (ISO 26262, SAE J2364)>
+
+### FORMATTING RULES
+1. Use SHALL or MUST for binding requirements. Never use "should".
+2. Each description must be specific, unambiguous, and testable.
+3. Include numeric metrics wherever applicable (e.g., "≤ 10 ms", "≥ 250 Nm", "ASIL D").
+4. Append the requirement classification at the end of the Description line:
+   Valid types: (Functional) | (Non-Functional - Performance) | (Non-Functional - Safety) |
+               (Non-Functional - Electrical) | (Non-Functional - Robustness)
+5. Generate AT LEAST 10 requirements per request unless the context is clearly limited.
+6. Do NOT output markdown, bold markers (**), asterisks, or bullet points.
+7. Do NOT add conversational text, apologies, or preambles — output requirements only.
+
+### EXAMPLE OUTPUT
+REQ-001: Electric Motor Torque Output
+Description: The electric motor shall deliver a minimum torque of 250 Nm at 0°C ambient
+temperature and 100 km/h vehicle speed, with a maximum speed of 15,000 rpm, compliant
+with ISO 26262 ASIL D. (Functional)
+
+REQ-002: Battery Management System Voltage Limits
+Description: The BMS shall maintain traction battery voltage within ±2% of nominal operating
+range and respond to overvoltage conditions within 10 ms, per IEC 61960-1. (Non-Functional - Safety)
+
+### YOUR TURN
+Generate requirements based on the context and user request provided below.
+Ensure unique sequential IDs and strict adherence to the format above.
+"""
